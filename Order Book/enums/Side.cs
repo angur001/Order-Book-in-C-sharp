@@ -1,5 +1,8 @@
-enum Side
+namespace Order_Book.enums
 {
-    Buy,
-    Sell
+    public enum Side
+    {
+        Buy,
+        Sell
+    }
 }

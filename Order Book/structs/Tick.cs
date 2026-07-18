@@ -1,5 +1,8 @@
-public struct Tick
+namespace Order_Book.structs
 {
-    public decimal price { get; set; }
-    public uint quantity { get; set; }
+    public struct Tick
+    {
+        public decimal price { get; set; }
+        public uint quantity { get; set; }
+    }
 }

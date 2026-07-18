@@ -1,5 +1,9 @@
-enum OrderType
+namespace Order_Book.enums
 {
-    GoodTillCancel,
-    FillAndKill,
+    public enum OrderType
+    {
+        GoodTillCancel,
+        FillAndKill,
+    }
+
 }
