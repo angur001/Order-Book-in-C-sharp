@@ -1,6 +1,6 @@
 using Order_Book.structs;
 
-namespace Order_Book.Trade
+namespace Order_Book.classes
 {
     public class Trade {
 
