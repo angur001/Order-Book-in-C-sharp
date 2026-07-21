@@ -2,7 +2,7 @@ using OrderBook.Enums;
 
 namespace OrderBook.Classes;
 
-public class Order
+public record Order
 {
     private Price _price { get; set; }
     private OrderId _orderId { get; set; }

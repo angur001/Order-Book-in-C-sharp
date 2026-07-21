@@ -23,7 +23,7 @@ public class ModifyOrderCommand
     public Price GetPrice() => _price;
     public Quantity GetQuantity() => _quantity;
     public Side GetSide() => _side;
-    public Order execute(OrderType orderType)
+    public Order ToOrder(OrderType orderType)
     {
         return new Order(_orderId, _price, _quantity, _side, orderType);
     }
