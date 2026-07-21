@@ -1,22 +1,19 @@
-using Order_Book.structs;
+using OrderBook.Structs;
 
-namespace Order_Book.classes
+namespace OrderBook.Trade;
+
+public class Trade
 {
-    public class Trade {
+    private TradeInfo bidTrade;
+    private TradeInfo askTrade;
 
-        private TradeInfo bidTrade;
-        private TradeInfo askTrade;
-        public Trade(TradeInfo bidTrade, TradeInfo askTrade) {
-            this.bidTrade = bidTrade;
-            this.askTrade = askTrade;
-        }
-        
-        public TradeInfo GetBidTrade() {
-            return bidTrade;
-        }
-
-        public TradeInfo GetAskTrade() {
-            return askTrade;
-        }
+    public Trade(TradeInfo bidTrade, TradeInfo askTrade)
+    {
+        this.bidTrade = bidTrade;
+        this.askTrade = askTrade;
     }
+
+    public TradeInfo GetBidTrade() => bidTrade;
+
+    public TradeInfo GetAskTrade() => askTrade;
 }

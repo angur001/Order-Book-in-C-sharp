@@ -1,8 +1,9 @@
-namespace Order_Book.structs
+using OrderBook;
+
+namespace OrderBook.Structs;
+
+public struct Tick
 {
-    public struct Tick
-    {
-        public Price price { get; set; }
-        public Quantity quantity { get; set; }
-    }
+    public Price price { get; set; }
+    public Quantity quantity { get; set; }
 }

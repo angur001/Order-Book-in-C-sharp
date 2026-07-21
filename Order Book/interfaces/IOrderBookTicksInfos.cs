@@ -1,11 +1,10 @@
-using Order_Book.structs;
+using OrderBook.Structs;
 
-namespace Order_Book.interfaces
-{
+namespace OrderBook.Interfaces;
+
 public interface IOrderBookTicksInfos
-    {
-        IEnumerable<Tick> GetTicks();
-        IEnumerable<Tick> GetAsks();
-        IEnumerable<Tick> GetBids();
-    }
+{
+    IEnumerable<Tick> GetTicks();
+    IEnumerable<Tick> GetAsks();
+    IEnumerable<Tick> GetBids();
 }
