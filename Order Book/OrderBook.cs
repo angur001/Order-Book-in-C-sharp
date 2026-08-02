@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using OrderBook.Classes;
 using OrderBook.Enums;
 using OrderBook.Interfaces;
@@ -12,7 +13,7 @@ public class OrderBook
     private readonly SortedDictionary<Price, LinkedList<Order>> _asks = new();
     private readonly SortedDictionary<Price, LinkedList<Order>> _bids =
         new SortedDictionary<Price, LinkedList<Order>>(Comparer<Price>.Create((x, y) => y.Value.CompareTo(x.Value)));
-    private readonly Dictionary<OrderId, LinkedListNode<Order>> _orders = new();
+    private readonly ConcurrentDictionary<OrderId, LinkedListNode<Order>> _orders = new();
 
     public bool CanMatch(Side side, Price price)
     {
@@ -64,12 +65,12 @@ public class OrderBook
                 if (bid.GetRemainingQuantity().Value == 0)
                 {
                     bids.RemoveFirst();
-                    _orders.Remove(bid.GetOrderId());
+                    _orders.TryRemove(bid.GetOrderId(), out _);
                 }
                 if (ask.GetRemainingQuantity().Value == 0)
                 {
                     asks.RemoveFirst();
-                    _orders.Remove(ask.GetOrderId());
+                    _orders.TryRemove(ask.GetOrderId(), out _);
                 }
 
                 trades.Add(new TradeNamespace.Trade(
@@ -126,6 +127,20 @@ public class OrderBook
         if (_orders.ContainsKey(order.GetOrderId()))
         {
             return new List<TradeNamespace.Trade>();
+        }
+
+        if (order.GetOrderType() == OrderType.Market)
+        {
+            if (order.GetSide() == Side.Buy && _asks.Count != 0)
+            {
+                var (worstAskPrice, _) = _asks.Last();
+                order.ToGoodTillCancel(worstAskPrice);
+            }
+            else if (order.GetSide() == Side.Sell && _bids.Count != 0)
+            {
+                var (worstBidPrice, _) = _bids.Last();
+                order.ToGoodTillCancel(worstBidPrice);
+            }
         }
         
         // if the order is a FillAndKill order and cannot be matched, throw an exception
@@ -191,7 +206,7 @@ public class OrderBook
             }
         }
         
-        _orders.Remove(orderId);
+        _orders.TryRemove(orderId, out _);
     }
 
     public List<TradeNamespace.Trade> ModifyOrder(ModifyOrderCommand modifyOrderCommand)
