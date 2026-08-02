@@ -21,6 +21,11 @@ public record Order
         _remainingQuantity = quantity;
     }
 
+    public Order(OrderId orderId, Quantity quantity, Side side) => 
+        new Order(orderId, Price.InvalidPrice, quantity, side, OrderType.Market);
+
+    public Order ToGoodTillCancel(Price price) => new Order(_orderId, price, _initialQuantity, _side, OrderType.GoodTillCancel);
+
     public OrderId GetOrderId() => _orderId;
     public Price GetPrice() => _price;
     public Side GetSide() => _side;
