@@ -10,11 +10,18 @@ namespace OrderBook;
 
 public class OrderBook : IDisposable
 {
-    private readonly SortedDictionary<Price, LinkedList<Order>> _asks =
-        new SortedDictionary<Price, LinkedList<Order>>(Comparer<Price>.Create((x, y) => x.Value.CompareTo(y.Value)));
-    private readonly SortedDictionary<Price, LinkedList<Order>> _bids =
-        new SortedDictionary<Price, LinkedList<Order>>(Comparer<Price>.Create((x, y) => y.Value.CompareTo(x.Value)));
+    private readonly SortedDictionary<Price, PriceLevel> _asks =
+        new SortedDictionary<Price, PriceLevel>(Comparer<Price>.Create((x, y) => x.Value.CompareTo(y.Value)));
+    private readonly SortedDictionary<Price, PriceLevel> _bids =
+        new SortedDictionary<Price, PriceLevel>(Comparer<Price>.Create((x, y) => y.Value.CompareTo(x.Value)));
     private readonly ConcurrentDictionary<OrderId, LinkedListNode<Order>> _orders = new();
+
+    // Cached so Market-order repricing doesn't need an O(n) scan to find the
+    // worst resting price on the opposite side (unlike SortedSet, SortedDictionary
+    // has no built-in O(log n) Max/Min). Maintained solely by GetOrCreate*Level and
+    // Remove*LevelIfEmpty - the only places price levels are created or removed.
+    private Price? _worstAskPrice;
+    private Price? _worstBidPrice;
 
     // Guards mutations of _asks/_bids (SortedDictionary/LinkedList are not thread-safe).
     // Monitor locks are reentrant on the same thread, so nested lock statements
@@ -28,8 +35,6 @@ public class OrderBook : IDisposable
     // wall clock.
     private readonly TimeProvider _timeProvider;
     private readonly ITimer _pruneTimer;
-
-    private readonly ConcurrentDictionary<Price, LevelData> _metadata = new();
 
     public OrderBook() : this(TimeProvider.System)
     {
@@ -63,37 +68,25 @@ public class OrderBook : IDisposable
         lock (_mutex)
         {
             if (!CanMatch(side, price)) return false;
-            Price threshold;
 
-            if (side == Side.Buy)
+            // The opposite side's levels are already isolated by side and sorted
+            // from best to worst, so we can walk them in order and stop as soon as
+            // a level is priced beyond what the incoming order is willing to accept.
+            var levels = side == Side.Buy ? _asks : _bids;
+            foreach (var (levelPrice, level) in levels)
             {
-                threshold = _asks.First().Key;
-            }
-            else
-            {
-                threshold = _bids.First().Key;
-            }
-
-            foreach ((var levelPrice, var levelData) in _metadata)
-            {
-                if ((side == Side.Buy && levelPrice.Value < threshold.Value) ||
-                    (side == Side.Sell && levelPrice.Value > threshold.Value))
-                {
-                    continue;
-                }
-
                 if ((side == Side.Buy && levelPrice.Value > price.Value) ||
                     (side == Side.Sell && levelPrice.Value < price.Value))
                 {
-                    continue;
+                    break;
                 }
 
-                if (levelData.quantity.Value >= quantity.Value)
+                if (level.TotalQuantity.Value >= quantity.Value)
                 {
                     return true;
                 }
 
-                quantity -= levelData.quantity;
+                quantity -= level.TotalQuantity;
             }
 
             return false;
@@ -113,15 +106,18 @@ public class OrderBook : IDisposable
                     break;
                 }
 
-                // get the best bid and ask prices and their corresponding order lists
+                // get the best bid and ask prices and their corresponding price levels
                 var bestBid = _bids.First();
                 var bestAsk = _asks.First();
 
-                var (bidPrice, bids) = bestBid;
-                var (askPrice, asks) = bestAsk;
+                var (bidPrice, bidLevel) = bestBid;
+                var (askPrice, askLevel) = bestAsk;
 
                 // if the best bid price is lower than the best ask price, we cannot match any orders, so we break the loop
                 if (bidPrice.Value < askPrice.Value) break;
+
+                var bids = bidLevel.Orders;
+                var asks = askLevel.Orders;
 
                 // we loop through the orders at the best bid and ask prices and match them until one of the lists is empty
                 while (bids.Count > 0 && asks.Count > 0)
@@ -161,30 +157,23 @@ public class OrderBook : IDisposable
                             tradeQuantity)
                     ));
 
-                    // Update LevelData for the matched price level
-                    OnOrderMatched(bidPrice, tradeQuantity, bid.IsFilled());
-                    OnOrderMatched(askPrice, tradeQuantity, ask.IsFilled());
+                    // Update each level's running quantity for the matched price level
+                    bidLevel.RecordFill(tradeQuantity);
+                    askLevel.RecordFill(tradeQuantity);
                 }
 
                 // Remove the price level from the tree if its list is now empty. This must happen
                 // before the next outer-loop iteration, otherwise _bids.First()/_asks.First() would
                 // keep re-selecting this exhausted (but still-present) level forever.
-                if (bids.Count == 0)
-                {
-                    _bids.Remove(bidPrice);
-                }
-
-                if (asks.Count == 0)
-                {
-                    _asks.Remove(askPrice);
-                }
+                RemoveBidLevelIfEmpty(bidPrice, bidLevel);
+                RemoveAskLevelIfEmpty(askPrice, askLevel);
             }
 
             // Remove All Remaining Orders with FillAndKill OrderType
             if (_bids.Count > 0)
             {
-                var (_, remainingBids) = _bids.First();
-                var order = remainingBids.First?.Value;
+                var (_, remainingBidLevel) = _bids.First();
+                var order = remainingBidLevel.Orders.First?.Value;
                 if (order != null && order.GetOrderType() == OrderType.FillAndKill)
                 {
                     CancelOrder(order.GetOrderId());
@@ -193,8 +182,8 @@ public class OrderBook : IDisposable
 
             if (_asks.Count > 0)
             {
-                var (_, remainingAsks) = _asks.First();
-                var order = remainingAsks.First?.Value;
+                var (_, remainingAskLevel) = _asks.First();
+                var order = remainingAskLevel.Orders.First?.Value;
                 if (order != null && order.GetOrderType() == OrderType.FillAndKill)
                 {
                     CancelOrder(order.GetOrderId());
@@ -204,17 +193,13 @@ public class OrderBook : IDisposable
             return trades;
         }
     }
-
-    private void OnOrderMatched(Price bidPrice, Quantity tradeQuantity, bool isFullyFilled)
-    {
-        UpdateLevelData(bidPrice, tradeQuantity, isFullyFilled ? LevelData.Action.Remove : LevelData.Action.Match);
-    }
+    
 
     public IReadOnlyList<TradeNamespace.Trade> AddOrder(Order order)
     {
         lock (_mutex)
         {
-            // if order already exists, throw an exception
+            // if order already exists, ignore this add
             if (_orders.ContainsKey(order.GetOrderId()))
             {
                 return Array.Empty<TradeNamespace.Trade>();
@@ -222,105 +207,88 @@ public class OrderBook : IDisposable
 
             if (order.GetOrderType() == OrderType.Market)
             {
-                if (order.GetSide() == Side.Buy && _asks.Count != 0)
+                if (order.GetSide() == Side.Buy && _worstAskPrice is { } worstAskPrice)
                 {
-                    var (worstAskPrice, _) = _asks.Last();
                     order = order.ToGoodTillCancel(worstAskPrice);
                 }
-                else if (order.GetSide() == Side.Sell && _bids.Count != 0)
+                else if (order.GetSide() == Side.Sell && _worstBidPrice is { } worstBidPrice)
                 {
-                    var (worstBidPrice, _) = _bids.Last();
                     order = order.ToGoodTillCancel(worstBidPrice);
                 }
             }
 
-            // if the order is a FillAndKill order and cannot be matched 
+            // if the order is a FillAndKill order and cannot be matched
             if (order.GetOrderType() == OrderType.FillAndKill && !CanMatch(order.GetSide(), order.GetPrice()))
             {
                 return Array.Empty<TradeNamespace.Trade>();
             }
 
-            // if the order is a FillOrKill order and cannot be fully matched, throw an exception
+            // if the order is a FillOrKill order and cannot be fully matched, reject it
             if (order.GetOrderType() == OrderType.FillOrKill && !CanFullyMatch(order.GetSide(), order.GetPrice(), order.GetInitialQuantity()))
             {
                 return Array.Empty<TradeNamespace.Trade>();
             }
 
             // Add the order to the appropriate side of the order book
-            LinkedListNode<Order> orderNode;
-            if (order.GetSide() == Side.Buy)
-            {
-                if (!_bids.TryGetValue(order.GetPrice(), out var bids))
-                {
-                    bids = new LinkedList<Order>();
-                    _bids[order.GetPrice()] = bids;
-                }
-
-                orderNode = bids.AddLast(order);
-            }
-            else
-            {
-                if (!_asks.TryGetValue(order.GetPrice(), out var asks))
-                {
-                    asks = new LinkedList<Order>();
-                    _asks[order.GetPrice()] = asks;
-                }
-
-                orderNode = asks.AddLast(order);
-            }
+            var level = order.GetSide() == Side.Buy
+                ? GetOrCreateBidLevel(order.GetPrice())
+                : GetOrCreateAskLevel(order.GetPrice());
+            var orderNode = level.Add(order);
 
             // Add the order to the dictionary of orders
             _orders[order.GetOrderId()] = orderNode;
-
-            OnOrderAdded(order);
 
             return MatchOrders();
         }
     }
 
-    private void OnOrderAdded(Order order)
+    private PriceLevel GetOrCreateBidLevel(Price price)
     {
-        UpdateLevelData(order.GetPrice(), order.GetRemainingQuantity(), LevelData.Action.Add);
+        if (!_bids.TryGetValue(price, out var level))
+        {
+            level = new PriceLevel();
+            _bids[price] = level;
+            if (_worstBidPrice is not { } worstBid || price.Value < worstBid.Value)
+            {
+                _worstBidPrice = price;
+            }
+        }
+
+        return level;
     }
 
-    private void UpdateLevelData(Price price, Quantity quantity, LevelData.Action action)
+    private PriceLevel GetOrCreateAskLevel(Price price)
     {
-        Quantity newQuantity;
-        Quantity newCount;
-        if (_metadata.TryGetValue(price, out var levelData))
+        if (!_asks.TryGetValue(price, out var level))
         {
-            if (action == LevelData.Action.Add)
+            level = new PriceLevel();
+            _asks[price] = level;
+            if (_worstAskPrice is not { } worstAsk || price.Value > worstAsk.Value)
             {
-                newQuantity = levelData.quantity + quantity;
-                newCount = levelData.count + new Quantity(1);
+                _worstAskPrice = price;
             }
-            else if (action == LevelData.Action.Remove)
-            {
-                newQuantity = levelData.quantity - quantity;
-                newCount = levelData.count - new Quantity(1);
-            }
-            else // (action == LevelData.Action.Match)
-            {
-                newQuantity = levelData.quantity - quantity;;
-                newCount = levelData.count;
-            }
-        }
-        else
-        {
-            // First order ever seen at this price level: Add is the only action
-            // that should be able to reach this branch (Remove/Match imply the
-            // level already existed).
-            newQuantity = quantity;
-            newCount = new Quantity(1);
         }
 
-        if (newCount == new Quantity(0))
+        return level;
+    }
+
+    private void RemoveBidLevelIfEmpty(Price price, PriceLevel level)
+    {
+        if (level.Count != 0) return;
+        _bids.Remove(price);
+        if (_worstBidPrice == price)
         {
-            _metadata.TryRemove(price, out _);
+            _worstBidPrice = _bids.Count == 0 ? null : _bids.Keys.Last();
         }
-        else
+    }
+
+    private void RemoveAskLevelIfEmpty(Price price, PriceLevel level)
+    {
+        if (level.Count != 0) return;
+        _asks.Remove(price);
+        if (_worstAskPrice == price)
         {
-            _metadata[price] = new LevelData { quantity = newQuantity, count = newCount };
+            _worstAskPrice = _asks.Count == 0 ? null : _asks.Keys.Last();
         }
     }
 
@@ -334,36 +302,23 @@ public class OrderBook : IDisposable
             var order = orderNode.Value;
             if (order.GetSide() == Side.Buy)
             {
-                if (_bids.TryGetValue(order.GetPrice(), out var bids))
+                if (_bids.TryGetValue(order.GetPrice(), out var level))
                 {
-                    bids.Remove(orderNode);
-                    if (bids.Count == 0)
-                    {
-                        _bids.Remove(order.GetPrice());
-                    }
+                    level.Remove(orderNode);
+                    RemoveBidLevelIfEmpty(order.GetPrice(), level);
                 }
             }
             else
             {
-                if (_asks.TryGetValue(order.GetPrice(), out var asks))
+                if (_asks.TryGetValue(order.GetPrice(), out var level))
                 {
-                    asks.Remove(orderNode);
-                    if (asks.Count == 0)
-                    {
-                        _asks.Remove(order.GetPrice());
-                    }
+                    level.Remove(orderNode);
+                    RemoveAskLevelIfEmpty(order.GetPrice(), level);
                 }
             }
 
             _orders.TryRemove(orderId, out _);
-
-            OnOrderCancelled(order);
         }
-    }
-
-    private void OnOrderCancelled(Order order)
-    {
-        UpdateLevelData(order.GetPrice(), order.GetRemainingQuantity(), LevelData.Action.Remove);
     }
 
     public IReadOnlyList<TradeNamespace.Trade> ModifyOrder(ModifyOrderCommand modifyOrderCommand)
@@ -393,16 +348,14 @@ public class OrderBook : IDisposable
             List<Tick> asks = new();
             List<Tick> bids = new();
 
-            foreach (var (price, orders) in _asks)
+            foreach (var (price, level) in _asks)
             {
-                Quantity totalQuantity = new((uint)orders.Sum(order => order.GetRemainingQuantity().Value));
-                asks.Add(new Tick { price = price, quantity = totalQuantity });
+                asks.Add(new Tick { price = price, quantity = level.TotalQuantity });
             }
 
-            foreach (var (price, orders) in _bids)
+            foreach (var (price, level) in _bids)
             {
-                Quantity totalQuantity = new((uint)orders.Sum(order => order.GetRemainingQuantity().Value));
-                bids.Add(new Tick { price = price, quantity = totalQuantity });
+                bids.Add(new Tick { price = price, quantity = level.TotalQuantity });
             }
 
             return new OrderBookTickInfos(asks, bids);
