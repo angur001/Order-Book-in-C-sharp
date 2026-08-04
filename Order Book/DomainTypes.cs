@@ -8,6 +8,8 @@ public readonly record struct OrderId(uint Value)
 public readonly record struct Quantity(uint Value)
 {
     public override string ToString() => Value.ToString();
+    public static Quantity operator +(Quantity a, Quantity b) => new(a.Value + b.Value);
+    public static Quantity operator -(Quantity a, Quantity b) => new(a.Value - b.Value);
 }
 
 public readonly record struct Price(decimal Value)

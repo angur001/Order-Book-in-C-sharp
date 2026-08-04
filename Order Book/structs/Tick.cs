@@ -1,5 +1,3 @@
-using OrderBook;
-
 namespace OrderBook.Structs;
 
 public struct Tick

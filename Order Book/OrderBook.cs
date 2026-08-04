@@ -24,6 +24,8 @@ public class OrderBook : IDisposable
     private readonly CancellationTokenSource _pruneCts = new();
     private readonly Thread _pruneThread;
 
+    private readonly ConcurrentDictionary<Price, LevelData> _metadata = new();
+
     public OrderBook()
     {
         _pruneThread = new Thread(PruneGoodForDayOrdersLoop)
@@ -44,6 +46,48 @@ public class OrderBook : IDisposable
             }
 
             return _bids.Count > 0 && price.Value <= _bids.First().Key.Value;
+        }
+    }
+
+    public bool CanFullyMatch(Side side, Price price, Quantity quantity)
+    {
+        lock (_mutex)
+        {
+            if (!CanMatch(side, price)) return false;
+            Price threshold;
+
+            if (side == Side.Buy)
+            {
+                threshold = _asks.First().Key;
+            }
+            else
+            {
+                threshold = _bids.First().Key;
+            }
+
+            foreach ((var levelPrice, var levelData) in _metadata)
+            {
+                if ((side == Side.Buy && levelPrice.Value < threshold.Value) ||
+                    (side == Side.Sell && levelPrice.Value > threshold.Value))
+                {
+                    continue;
+                }
+
+                if ((side == Side.Buy && levelPrice.Value > price.Value) ||
+                    (side == Side.Sell && levelPrice.Value < price.Value))
+                {
+                    continue;
+                }
+
+                if (levelData.quantity.Value >= quantity.Value)
+                {
+                    return true;
+                }
+
+                quantity -= levelData.quantity;
+            }
+
+            return false;
         }
     }
 
@@ -107,20 +151,24 @@ public class OrderBook : IDisposable
                             ask.GetPrice(),
                             tradeQuantity)
                     ));
-                }
 
-                // At the end check if the linked lists are empty and remove the price level from the tree if they are
-                if (bids.Count == 0)
-                {
-                    _bids.Remove(bidPrice);
-                }
-
-                if (asks.Count == 0)
-                {
-                    _asks.Remove(askPrice);
+                    // Update LevelData for the matched price level
+                    OnOrderMatched(bidPrice, tradeQuantity, bid.IsFilled());
+                    OnOrderMatched(askPrice, tradeQuantity, ask.IsFilled());
                 }
             }
 
+            // At the end check if the linked lists are empty and remove the price level from the tree if they are
+            if (bids.Count == 0)
+            {
+                _bids.Remove(bidPrice);
+            }
+
+            if (asks.Count == 0)
+            {
+                _asks.Remove(askPrice);
+            }
+            
             // Remove All Remaining Orders with FillAndKill OrderType
             if (_bids.Count > 0)
             {
@@ -144,6 +192,11 @@ public class OrderBook : IDisposable
 
             return trades;
         }
+    }
+
+    private void OnOrderMatched(Price bidPrice, Quantity tradeQuantity, bool isFullyFilled)
+    {
+        UpdateLevelData(bidPrice, tradeQuantity, isFullyFilled ? LevelData.Action.Remove : LevelData.Action.Match);
     }
 
     public List<TradeNamespace.Trade> AddOrder(Order order)
@@ -170,8 +223,14 @@ public class OrderBook : IDisposable
                 }
             }
 
-            // if the order is a FillAndKill order and cannot be matched, throw an exception
+            // if the order is a FillAndKill order and cannot be matched 
             if (order.GetOrderType() == OrderType.FillAndKill && !CanMatch(order.GetSide(), order.GetPrice()))
+            {
+                return new List<TradeNamespace.Trade>();
+            }
+
+            // if the order is a FillOrKill order and cannot be fully matched, throw an exception
+            if (order.GetOrderType() == OrderType.FillOrKill && !CanFullyMatch(order.GetSide(), order.GetPrice(), order.GetInitialQuantity()))
             {
                 return new List<TradeNamespace.Trade>();
             }
@@ -201,7 +260,47 @@ public class OrderBook : IDisposable
             // Add the order to the dictionary of orders
             _orders[order.GetOrderId()] = new LinkedListNode<Order>(order);
 
+            OnOrderAdded(order);
+
             return MatchOrders();
+        }
+    }
+
+    private void OnOrderAdded(Order order)
+    {
+        UpdateLevelData(order.GetPrice(), order.GetRemainingQuantity(), LevelData.Action.Add);
+    }
+
+    private void UpdateLevelData(Price price, Quantity quantity, LevelData.Action action)
+    {
+        Quantity newQuantity;
+        Quantity newCount;
+        if (_metadata.TryGetValue(price, out var levelData))
+        {
+            if (action == LevelData.Action.Add)
+            {
+                newQuantity = levelData.quantity + quantity;
+                newCount = levelData.count + new Quantity(1);
+            }
+            else if (action == LevelData.Action.Remove)
+            {
+                newQuantity = levelData.quantity - quantity;
+                newCount = levelData.count - new Quantity(1);
+            }
+            else // (action == LevelData.Action.Match)
+            {
+                newQuantity = levelData.quantity - quantity;;
+                newCount = levelData.count;
+            }
+
+            if (newCount == new Quantity(0))
+            {
+                _metadata.TryRemove(price, out _);
+            }
+            else
+            {
+                _metadata[price] = new LevelData { quantity = newQuantity, count = newCount };
+            }
         }
     }
 
@@ -237,7 +336,14 @@ public class OrderBook : IDisposable
             }
 
             _orders.TryRemove(orderId, out _);
+
+            OnOrderCancelled(order);
         }
+    }
+
+    private void OnOrderCancelled(Order order)
+    {
+        UpdateLevelData(order.GetPrice(), order.GetRemainingQuantity(), LevelData.Action.Remove);
     }
 
     public List<TradeNamespace.Trade> ModifyOrder(ModifyOrderCommand modifyOrderCommand)

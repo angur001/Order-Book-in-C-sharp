@@ -40,4 +40,6 @@ public record Order
             throw new ArgumentException($" (Order:{GetOrderId()}): Quantity to fill exceeds remaining quantity.");
         _remainingQuantity = new Quantity(_remainingQuantity.Value - quantity.Value);
     }
+
+    public bool IsFilled() => _remainingQuantity.Value == 0;
 }
