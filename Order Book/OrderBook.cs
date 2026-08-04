@@ -100,7 +100,7 @@ public class OrderBook : IDisposable
         }
     }
 
-    public List<TradeNamespace.Trade> MatchOrders()
+    public IReadOnlyList<TradeNamespace.Trade> MatchOrders()
     {
         lock (_mutex)
         {
@@ -210,14 +210,14 @@ public class OrderBook : IDisposable
         UpdateLevelData(bidPrice, tradeQuantity, isFullyFilled ? LevelData.Action.Remove : LevelData.Action.Match);
     }
 
-    public List<TradeNamespace.Trade> AddOrder(Order order)
+    public IReadOnlyList<TradeNamespace.Trade> AddOrder(Order order)
     {
         lock (_mutex)
         {
             // if order already exists, throw an exception
             if (_orders.ContainsKey(order.GetOrderId()))
             {
-                return new List<TradeNamespace.Trade>();
+                return Array.Empty<TradeNamespace.Trade>();
             }
 
             if (order.GetOrderType() == OrderType.Market)
@@ -237,13 +237,13 @@ public class OrderBook : IDisposable
             // if the order is a FillAndKill order and cannot be matched 
             if (order.GetOrderType() == OrderType.FillAndKill && !CanMatch(order.GetSide(), order.GetPrice()))
             {
-                return new List<TradeNamespace.Trade>();
+                return Array.Empty<TradeNamespace.Trade>();
             }
 
             // if the order is a FillOrKill order and cannot be fully matched, throw an exception
             if (order.GetOrderType() == OrderType.FillOrKill && !CanFullyMatch(order.GetSide(), order.GetPrice(), order.GetInitialQuantity()))
             {
-                return new List<TradeNamespace.Trade>();
+                return Array.Empty<TradeNamespace.Trade>();
             }
 
             // Add the order to the appropriate side of the order book
@@ -366,13 +366,13 @@ public class OrderBook : IDisposable
         UpdateLevelData(order.GetPrice(), order.GetRemainingQuantity(), LevelData.Action.Remove);
     }
 
-    public List<TradeNamespace.Trade> ModifyOrder(ModifyOrderCommand modifyOrderCommand)
+    public IReadOnlyList<TradeNamespace.Trade> ModifyOrder(ModifyOrderCommand modifyOrderCommand)
     {
         lock (_mutex)
         {
             if (!_orders.TryGetValue(modifyOrderCommand.GetOrderId(), out var orderNode))
             {
-                return new List<TradeNamespace.Trade>();
+                return Array.Empty<TradeNamespace.Trade>();
             }
 
             var order = orderNode.Value;
