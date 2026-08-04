@@ -21,20 +21,28 @@ public class OrderBook : IDisposable
     // (AddOrder -> MatchOrders, or the pruner batching CancelOrder calls) are safe.
     private readonly object _mutex = new();
 
-    // Drives the GoodForDay pruning: cancelled to wake the thread early on Dispose.
-    private readonly CancellationTokenSource _pruneCts = new();
-    private readonly Thread _pruneThread;
+    // Drives the GoodForDay pruning. Routing "what time is it" and "wait until
+    // this instant" through TimeProvider (instead of DateTime.Now / a raw
+    // Thread.Sleep-style wait) means tests can inject a FakeTimeProvider and
+    // fast-forward past a simulated midnight instead of waiting on the real
+    // wall clock.
+    private readonly TimeProvider _timeProvider;
+    private readonly ITimer _pruneTimer;
 
     private readonly ConcurrentDictionary<Price, LevelData> _metadata = new();
 
-    public OrderBook()
+    public OrderBook() : this(TimeProvider.System)
     {
-        _pruneThread = new Thread(PruneGoodForDayOrdersLoop)
-        {
-            IsBackground = true,
-            Name = "GoodForDayOrderPruner"
-        };
-        _pruneThread.Start();
+    }
+
+    public OrderBook(TimeProvider timeProvider)
+    {
+        _timeProvider = timeProvider;
+        _pruneTimer = _timeProvider.CreateTimer(
+            _ => PruneGoodForDayOrdersAndScheduleNext(),
+            null,
+            GetDelayUntilNextMidnight(),
+            Timeout.InfiniteTimeSpan);
     }
 
     public bool CanMatch(Side side, Price price)
@@ -401,26 +409,20 @@ public class OrderBook : IDisposable
         }
     }
 
-    /// Background loop that wakes up exactly at each upcoming midnight and prunes
-    /// any GoodForDay orders still resting in the book.
-    private void PruneGoodForDayOrdersLoop()
+    private TimeSpan GetDelayUntilNextMidnight()
     {
-        var token = _pruneCts.Token;
-        while (!token.IsCancellationRequested)
-        {
-            var now = DateTime.Now;
-            var nextMidnight = now.Date.AddDays(1);
-            var delay = nextMidnight - now;
+        var now = _timeProvider.GetLocalNow().DateTime;
+        var nextMidnight = now.Date.AddDays(1);
+        return nextMidnight - now;
+    }
 
-            // WaitOne returns true only if the token's wait handle was signalled (Dispose was called),
-            // in which case we stop; a timeout means it's midnight and we should prune.
-            if (token.WaitHandle.WaitOne(delay))
-            {
-                break;
-            }
-
-            PruneGoodForDayOrders();
-        }
+    // Timer callback: fires at each upcoming midnight (per _timeProvider), prunes
+    // any GoodForDay orders still resting in the book, then reschedules itself for
+    // the following midnight.
+    private void PruneGoodForDayOrdersAndScheduleNext()
+    {
+        PruneGoodForDayOrders();
+        _pruneTimer.Change(GetDelayUntilNextMidnight(), Timeout.InfiniteTimeSpan);
     }
 
     private void PruneGoodForDayOrders()
@@ -451,8 +453,9 @@ public class OrderBook : IDisposable
 
     public void Dispose()
     {
-        _pruneCts.Cancel();
-        _pruneThread.Join();
-        _pruneCts.Dispose();
+        // DisposeAsync's returned task completes once any in-flight callback has
+        // finished and no further callbacks will fire; blocking on it here keeps
+        // Dispose's synchronous contract while preserving that guarantee.
+        _pruneTimer.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 }
