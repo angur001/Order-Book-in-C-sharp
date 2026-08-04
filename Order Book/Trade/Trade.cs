@@ -2,10 +2,10 @@ using OrderBook.Structs;
 
 namespace OrderBook.Trade;
 
-public class Trade
+public readonly record struct Trade
 {
-    private TradeInfo bidTrade;
-    private TradeInfo askTrade;
+    private readonly TradeInfo bidTrade;
+    private readonly TradeInfo askTrade;
 
     public Trade(TradeInfo bidTrade, TradeInfo askTrade)
     {
