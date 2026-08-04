@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/Order Book/">
+    <Project Path="Order Book/OrderBook.csproj" />
+  </Folder>
+  <Project Path="OrderBook.Tests/OrderBook.Tests.csproj" />
+</Solution>
