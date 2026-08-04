@@ -10,7 +10,8 @@ namespace OrderBook;
 
 public class OrderBook : IDisposable
 {
-    private readonly SortedDictionary<Price, LinkedList<Order>> _asks = new();
+    private readonly SortedDictionary<Price, LinkedList<Order>> _asks =
+        new SortedDictionary<Price, LinkedList<Order>>(Comparer<Price>.Create((x, y) => x.Value.CompareTo(y.Value)));
     private readonly SortedDictionary<Price, LinkedList<Order>> _bids =
         new SortedDictionary<Price, LinkedList<Order>>(Comparer<Price>.Create((x, y) => y.Value.CompareTo(x.Value)));
     private readonly ConcurrentDictionary<OrderId, LinkedListNode<Order>> _orders = new();
@@ -156,24 +157,26 @@ public class OrderBook : IDisposable
                     OnOrderMatched(bidPrice, tradeQuantity, bid.IsFilled());
                     OnOrderMatched(askPrice, tradeQuantity, ask.IsFilled());
                 }
+
+                // Remove the price level from the tree if its list is now empty. This must happen
+                // before the next outer-loop iteration, otherwise _bids.First()/_asks.First() would
+                // keep re-selecting this exhausted (but still-present) level forever.
+                if (bids.Count == 0)
+                {
+                    _bids.Remove(bidPrice);
+                }
+
+                if (asks.Count == 0)
+                {
+                    _asks.Remove(askPrice);
+                }
             }
 
-            // At the end check if the linked lists are empty and remove the price level from the tree if they are
-            if (bids.Count == 0)
-            {
-                _bids.Remove(bidPrice);
-            }
-
-            if (asks.Count == 0)
-            {
-                _asks.Remove(askPrice);
-            }
-            
             // Remove All Remaining Orders with FillAndKill OrderType
             if (_bids.Count > 0)
             {
-                var (_, bids) = _bids.First();
-                var order = bids.First?.Value;
+                var (_, remainingBids) = _bids.First();
+                var order = remainingBids.First?.Value;
                 if (order != null && order.GetOrderType() == OrderType.FillAndKill)
                 {
                     CancelOrder(order.GetOrderId());
@@ -182,8 +185,8 @@ public class OrderBook : IDisposable
 
             if (_asks.Count > 0)
             {
-                var (_, asks) = _asks.First();
-                var order = asks.First?.Value;
+                var (_, remainingAsks) = _asks.First();
+                var order = remainingAsks.First?.Value;
                 if (order != null && order.GetOrderType() == OrderType.FillAndKill)
                 {
                     CancelOrder(order.GetOrderId());
@@ -236,6 +239,7 @@ public class OrderBook : IDisposable
             }
 
             // Add the order to the appropriate side of the order book
+            LinkedListNode<Order> orderNode;
             if (order.GetSide() == Side.Buy)
             {
                 if (!_bids.TryGetValue(order.GetPrice(), out var bids))
@@ -244,7 +248,7 @@ public class OrderBook : IDisposable
                     _bids[order.GetPrice()] = bids;
                 }
 
-                bids.AddLast(order);
+                orderNode = bids.AddLast(order);
             }
             else
             {
@@ -254,11 +258,11 @@ public class OrderBook : IDisposable
                     _asks[order.GetPrice()] = asks;
                 }
 
-                asks.AddLast(order);
+                orderNode = asks.AddLast(order);
             }
 
             // Add the order to the dictionary of orders
-            _orders[order.GetOrderId()] = new LinkedListNode<Order>(order);
+            _orders[order.GetOrderId()] = orderNode;
 
             OnOrderAdded(order);
 
@@ -292,15 +296,23 @@ public class OrderBook : IDisposable
                 newQuantity = levelData.quantity - quantity;;
                 newCount = levelData.count;
             }
+        }
+        else
+        {
+            // First order ever seen at this price level: Add is the only action
+            // that should be able to reach this branch (Remove/Match imply the
+            // level already existed).
+            newQuantity = quantity;
+            newCount = new Quantity(1);
+        }
 
-            if (newCount == new Quantity(0))
-            {
-                _metadata.TryRemove(price, out _);
-            }
-            else
-            {
-                _metadata[price] = new LevelData { quantity = newQuantity, count = newCount };
-            }
+        if (newCount == new Quantity(0))
+        {
+            _metadata.TryRemove(price, out _);
+        }
+        else
+        {
+            _metadata[price] = new LevelData { quantity = newQuantity, count = newCount };
         }
     }
 
