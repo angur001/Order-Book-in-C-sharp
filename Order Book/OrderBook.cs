@@ -217,12 +217,12 @@ public class OrderBook : IDisposable
                 if (order.GetSide() == Side.Buy && _asks.Count != 0)
                 {
                     var (worstAskPrice, _) = _asks.Last();
-                    order.ToGoodTillCancel(worstAskPrice);
+                    order = order.ToGoodTillCancel(worstAskPrice);
                 }
                 else if (order.GetSide() == Side.Sell && _bids.Count != 0)
                 {
                     var (worstBidPrice, _) = _bids.Last();
-                    order.ToGoodTillCancel(worstBidPrice);
+                    order = order.ToGoodTillCancel(worstBidPrice);
                 }
             }
 
