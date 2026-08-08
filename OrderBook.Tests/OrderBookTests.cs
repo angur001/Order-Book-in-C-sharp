@@ -1,6 +1,7 @@
 using OrderBook;
 using OrderBook.Classes;
 using OrderBook.Enums;
+using OrderBook.Interfaces;
 using OrderBook.OrderCommands;
 using OB = OrderBook.OrderBook;
 
@@ -549,5 +550,55 @@ public class OrderBookTests
 
         stopwatch.Stop();
         Assert.True(stopwatch.ElapsedMilliseconds < 5000);
+    }
+
+    // ---------------------------------------------------------------
+    // Strategy injection (IPriceLadder) - OrderBook only depends on the
+    // interface, so a custom/future ladder implementation should be usable
+    // as a straight drop-in replacement for the default tree-based one.
+    // ---------------------------------------------------------------
+
+    [Fact]
+    public void Constructor_CustomPriceLadderFactory_IsUsedForBothSidesAndDrivesMatching()
+    {
+        var createdLadders = new List<CountingPriceLadder>();
+        using var book = new OB(TimeProvider.System, comparer =>
+        {
+            var ladder = new CountingPriceLadder(comparer);
+            createdLadders.Add(ladder);
+            return ladder;
+        });
+
+        book.AddOrder(new Order(new OrderId(1), new Price(100m), new Quantity(10), Side.Buy, OrderType.GoodTillCancel));
+        var trades = book.AddOrder(new Order(new OrderId(2), new Price(100m), new Quantity(10), Side.Sell, OrderType.GoodTillCancel));
+
+        Assert.Equal(2, createdLadders.Count); // one factory invocation per side (bids, asks)
+        Assert.Single(trades); // matching still works end-to-end through the injected strategy
+        Assert.True(createdLadders.Sum(l => l.GetOrCreateLevelCalls) > 0); // proves the injected instances were actually used, not bypassed
+    }
+
+    // Thin spy wrapping the default implementation, purely to prove OrderBook
+    // drives whatever IPriceLadder it's given rather than a concrete type.
+    private sealed class CountingPriceLadder(IComparer<Price> comparer) : IPriceLadder
+    {
+        private readonly TreePriceLadder _inner = new(comparer);
+        public int GetOrCreateLevelCalls { get; private set; }
+
+        public int Count => _inner.Count;
+        public Price? WorstPrice => _inner.WorstPrice;
+
+        public bool TryGetLevel(Price price, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out PriceLevel? level) =>
+            _inner.TryGetLevel(price, out level);
+
+        public PriceLevel GetOrCreateLevel(Price price)
+        {
+            GetOrCreateLevelCalls++;
+            return _inner.GetOrCreateLevel(price);
+        }
+
+        public void RemoveLevelIfEmpty(Price price, PriceLevel level) => _inner.RemoveLevelIfEmpty(price, level);
+        public KeyValuePair<Price, PriceLevel> First() => _inner.First();
+        public IEnumerator<KeyValuePair<Price, PriceLevel>> GetEnumerator() => _inner.GetEnumerator();
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
 }
