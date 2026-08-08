@@ -10,22 +10,20 @@ namespace OrderBook;
 
 public class OrderBook : IDisposable
 {
-    private readonly SortedDictionary<Price, PriceLevel> _asks =
-        new SortedDictionary<Price, PriceLevel>(Comparer<Price>.Create((x, y) => x.Value.CompareTo(y.Value)));
-    private readonly SortedDictionary<Price, PriceLevel> _bids =
-        new SortedDictionary<Price, PriceLevel>(Comparer<Price>.Create((x, y) => y.Value.CompareTo(x.Value)));
+    // The default strategy (Strategy pattern): a tree-based ladder that works
+    // for any price. Swap this at construction time - e.g. for a future
+    // tick-indexed array/ring-buffer ladder - without OrderBook itself changing.
+    private static readonly Func<IComparer<Price>, IPriceLadder> DefaultPriceLadderFactory =
+        comparer => new TreePriceLadder(comparer);
+
+    private readonly IPriceLadder _asks;
+    private readonly IPriceLadder _bids;
     private readonly ConcurrentDictionary<OrderId, LinkedListNode<Order>> _orders = new();
 
-    // Cached so Market-order repricing doesn't need an O(n) scan to find the
-    // worst resting price on the opposite side (unlike SortedSet, SortedDictionary
-    // has no built-in O(log n) Max/Min). Maintained solely by GetOrCreate*Level and
-    // Remove*LevelIfEmpty - the only places price levels are created or removed.
-    private Price? _worstAskPrice;
-    private Price? _worstBidPrice;
-
-    // Guards mutations of _asks/_bids (SortedDictionary/LinkedList are not thread-safe).
-    // Monitor locks are reentrant on the same thread, so nested lock statements
-    // (AddOrder -> MatchOrders, or the pruner batching CancelOrder calls) are safe.
+    // Guards mutations of _asks/_bids (the ladder implementations are not
+    // thread-safe). Monitor locks are reentrant on the same thread, so nested
+    // lock statements (AddOrder -> MatchOrders, or the pruner batching
+    // CancelOrder calls) are safe.
     private readonly object _mutex = new();
 
     // Drives the GoodForDay pruning. Routing "what time is it" and "wait until
@@ -36,13 +34,22 @@ public class OrderBook : IDisposable
     private readonly TimeProvider _timeProvider;
     private readonly ITimer _pruneTimer;
 
-    public OrderBook() : this(TimeProvider.System)
+    public OrderBook() : this(TimeProvider.System, DefaultPriceLadderFactory)
     {
     }
 
-    public OrderBook(TimeProvider timeProvider)
+    public OrderBook(TimeProvider timeProvider) : this(timeProvider, DefaultPriceLadderFactory)
+    {
+    }
+
+    // `priceLadderFactory` is handed a "best-first" comparer for each side and
+    // must return a ladder ordered by it; it's called once per side, so the
+    // same factory/strategy is used for both bids and asks.
+    public OrderBook(TimeProvider timeProvider, Func<IComparer<Price>, IPriceLadder> priceLadderFactory)
     {
         _timeProvider = timeProvider;
+        _asks = priceLadderFactory(Comparer<Price>.Create((x, y) => x.Value.CompareTo(y.Value)));
+        _bids = priceLadderFactory(Comparer<Price>.Create((x, y) => y.Value.CompareTo(x.Value)));
         _pruneTimer = _timeProvider.CreateTimer(
             _ => PruneGoodForDayOrdersAndScheduleNext(),
             null,
@@ -165,8 +172,8 @@ public class OrderBook : IDisposable
                 // Remove the price level from the tree if its list is now empty. This must happen
                 // before the next outer-loop iteration, otherwise _bids.First()/_asks.First() would
                 // keep re-selecting this exhausted (but still-present) level forever.
-                RemoveBidLevelIfEmpty(bidPrice, bidLevel);
-                RemoveAskLevelIfEmpty(askPrice, askLevel);
+                _bids.RemoveLevelIfEmpty(bidPrice, bidLevel);
+                _asks.RemoveLevelIfEmpty(askPrice, askLevel);
             }
 
             // Remove All Remaining Orders with FillAndKill OrderType
@@ -193,7 +200,6 @@ public class OrderBook : IDisposable
             return trades;
         }
     }
-    
 
     public IReadOnlyList<TradeNamespace.Trade> AddOrder(Order order)
     {
@@ -207,11 +213,11 @@ public class OrderBook : IDisposable
 
             if (order.GetOrderType() == OrderType.Market)
             {
-                if (order.GetSide() == Side.Buy && _worstAskPrice is { } worstAskPrice)
+                if (order.GetSide() == Side.Buy && _asks.WorstPrice is { } worstAskPrice)
                 {
                     order = order.ToGoodTillCancel(worstAskPrice);
                 }
-                else if (order.GetSide() == Side.Sell && _worstBidPrice is { } worstBidPrice)
+                else if (order.GetSide() == Side.Sell && _bids.WorstPrice is { } worstBidPrice)
                 {
                     order = order.ToGoodTillCancel(worstBidPrice);
                 }
@@ -231,64 +237,14 @@ public class OrderBook : IDisposable
 
             // Add the order to the appropriate side of the order book
             var level = order.GetSide() == Side.Buy
-                ? GetOrCreateBidLevel(order.GetPrice())
-                : GetOrCreateAskLevel(order.GetPrice());
+                ? _bids.GetOrCreateLevel(order.GetPrice())
+                : _asks.GetOrCreateLevel(order.GetPrice());
             var orderNode = level.Add(order);
 
             // Add the order to the dictionary of orders
             _orders[order.GetOrderId()] = orderNode;
 
             return MatchOrders();
-        }
-    }
-
-    private PriceLevel GetOrCreateBidLevel(Price price)
-    {
-        if (!_bids.TryGetValue(price, out var level))
-        {
-            level = new PriceLevel();
-            _bids[price] = level;
-            if (_worstBidPrice is not { } worstBid || price.Value < worstBid.Value)
-            {
-                _worstBidPrice = price;
-            }
-        }
-
-        return level;
-    }
-
-    private PriceLevel GetOrCreateAskLevel(Price price)
-    {
-        if (!_asks.TryGetValue(price, out var level))
-        {
-            level = new PriceLevel();
-            _asks[price] = level;
-            if (_worstAskPrice is not { } worstAsk || price.Value > worstAsk.Value)
-            {
-                _worstAskPrice = price;
-            }
-        }
-
-        return level;
-    }
-
-    private void RemoveBidLevelIfEmpty(Price price, PriceLevel level)
-    {
-        if (level.Count != 0) return;
-        _bids.Remove(price);
-        if (_worstBidPrice == price)
-        {
-            _worstBidPrice = _bids.Count == 0 ? null : _bids.Keys.Last();
-        }
-    }
-
-    private void RemoveAskLevelIfEmpty(Price price, PriceLevel level)
-    {
-        if (level.Count != 0) return;
-        _asks.Remove(price);
-        if (_worstAskPrice == price)
-        {
-            _worstAskPrice = _asks.Count == 0 ? null : _asks.Keys.Last();
         }
     }
 
@@ -300,21 +256,11 @@ public class OrderBook : IDisposable
             if (orderNode == null) return;
 
             var order = orderNode.Value;
-            if (order.GetSide() == Side.Buy)
+            var ladder = order.GetSide() == Side.Buy ? _bids : _asks;
+            if (ladder.TryGetLevel(order.GetPrice(), out var level))
             {
-                if (_bids.TryGetValue(order.GetPrice(), out var level))
-                {
-                    level.Remove(orderNode);
-                    RemoveBidLevelIfEmpty(order.GetPrice(), level);
-                }
-            }
-            else
-            {
-                if (_asks.TryGetValue(order.GetPrice(), out var level))
-                {
-                    level.Remove(orderNode);
-                    RemoveAskLevelIfEmpty(order.GetPrice(), level);
-                }
+                level.Remove(orderNode);
+                ladder.RemoveLevelIfEmpty(order.GetPrice(), level);
             }
 
             _orders.TryRemove(orderId, out _);
