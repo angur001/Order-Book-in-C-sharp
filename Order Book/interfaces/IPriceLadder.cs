@@ -21,7 +21,7 @@ public interface IPriceLadder : IEnumerable<KeyValuePair<Price, PriceLevel>>
     // The worst (furthest-from-best) resting price on this side, or null if there are no resting levels at all.
     Price? WorstPrice { get; }
 
-    bool TryGetLevel(Price price, out PriceLevel? level);
+    bool TryGetLevel(Price price, [NotNullWhen(true)] out PriceLevel? level);
 
     // Returns the existing level at `price`, or creates and registers a new one.
     PriceLevel GetOrCreateLevel(Price price);
