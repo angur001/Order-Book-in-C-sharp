@@ -577,6 +577,30 @@ public class OrderBookTests
         Assert.True(createdLadders.Sum(l => l.GetOrCreateLevelCalls) > 0); // proves the injected instances were actually used, not bypassed
     }
 
+    // Runs a real multi-level sweep through OrderBook configured with the
+    // Tier 2 array-backed ladder instead of the default tree, to prove it's
+    // a genuine drop-in replacement end-to-end and not just self-consistent
+    // in isolation (see ArrayPriceLadderTests for the ladder's own contract
+    // tests).
+    [Fact]
+    public void Constructor_ArrayPriceLadderStrategy_MatchesIdenticallyToTheDefault()
+    {
+        using var book = new OB(TimeProvider.System,
+            comparer => new ArrayPriceLadder(comparer, new Price(0m), new Price(200m), 1m));
+
+        book.AddOrder(new Order(new OrderId(1), new Price(100m), new Quantity(5), Side.Sell, OrderType.GoodTillCancel));
+        book.AddOrder(new Order(new OrderId(2), new Price(101m), new Quantity(5), Side.Sell, OrderType.GoodTillCancel));
+        var trades = book.AddOrder(new Order(new OrderId(3), new Price(101m), new Quantity(8), Side.Buy, OrderType.GoodTillCancel));
+
+        Assert.Equal(2, trades.Count);
+        Assert.Equal(new Quantity(5), trades[0].GetAskTrade().quantity);
+        Assert.Equal(new Quantity(3), trades[1].GetAskTrade().quantity);
+        Assert.Equal(1, book.GetOrderCount()); // id2 has 2 units left resting at 101
+        var asks = book.GetOrderBookTickInfos().GetAsks().ToList();
+        Assert.Single(asks);
+        Assert.Equal(new Quantity(2), asks[0].quantity);
+    }
+
     // Thin spy wrapping the default implementation, purely to prove OrderBook
     // drives whatever IPriceLadder it's given rather than a concrete type.
     private sealed class CountingPriceLadder(IComparer<Price> comparer) : IPriceLadder
