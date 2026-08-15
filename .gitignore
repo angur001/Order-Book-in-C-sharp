@@ -19,6 +19,9 @@ Thumbs.db
 ## Test results
 TestResults/
 
+## BenchmarkDotNet
+BenchmarkDotNet.Artifacts/
+
 ## NuGet packages
 *.nupkg
 *.snupkg
