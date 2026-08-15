@@ -1,0 +1,6 @@
+ArrayPriceLadder requires minPrice/maxPrice/tickSize up front and rejects anything outside that range.
+=> Try growable/rebasing behavior and Benchmark it against default static behavior.
+
+Potential improvement in the LevelData data structure
+=> Pre-allocate a pool of order/node objects at startup and reuse them instead of new-ing and letting the GC reclaim on every cancel/fill 
+=> removes steady-state allocation from the hot path entirely.
