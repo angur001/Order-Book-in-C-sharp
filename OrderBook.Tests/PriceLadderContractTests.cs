@@ -118,6 +118,31 @@ public abstract class PriceLadderContractTests
         Assert.Null(ladder.WorstPrice);
     }
 
+    // Implementations may pool and reuse the PriceLevel instance backing a
+    // slot/key once it empties out (see TreePriceLadder/ArrayPriceLadder), so
+    // this pins the observable contract: whatever comes back from
+    // GetOrCreateLevel after a level has emptied and been removed must look
+    // exactly like a brand new level, regardless of instance identity.
+    [Fact]
+    public void GetOrCreateLevel_AfterLevelEmptiedAndRemoved_BehavesLikeAFreshLevel()
+    {
+        var ladder = CreateAscendingLadder();
+        var price = new Price(100m);
+
+        var level = ladder.GetOrCreateLevel(price);
+        var node = level.Add(new Order(new OrderId(1), price, new Quantity(5), Side.Buy, OrderType.GoodTillCancel));
+        level.Remove(node);
+        ladder.RemoveLevelIfEmpty(price, level);
+        Assert.Equal(0, ladder.Count);
+
+        var recreatedLevel = ladder.GetOrCreateLevel(price);
+
+        Assert.Equal(1, ladder.Count);
+        Assert.Equal(0, recreatedLevel.Count);
+        Assert.Equal(new Quantity(0), recreatedLevel.TotalQuantity);
+        Assert.Empty(recreatedLevel.Orders);
+    }
+
     // The riskiest part of any caching implementation: WorstPrice (and, for an
     // array-backed ladder, BestPrice too) isn't a live computation, so removing
     // the level that happens to be the cached one must recompute it from
