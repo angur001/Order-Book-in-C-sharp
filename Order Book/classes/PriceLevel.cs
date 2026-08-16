@@ -35,4 +35,12 @@ public sealed class PriceLevel
     {
         TotalQuantity -= tradeQuantity;
     }
+
+    // Restores a pooled instance to the state a freshly-`new`ed PriceLevel
+    // would be in, so ladders can hand it back out via GetOrCreateLevel.
+    internal void Reset()
+    {
+        _orders.Clear();
+        TotalQuantity = default;
+    }
 }

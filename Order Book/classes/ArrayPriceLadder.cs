@@ -31,6 +31,7 @@ public sealed class ArrayPriceLadder : IPriceLadder
     private readonly decimal _tickSize;
     private readonly bool _ascending;
     private readonly PriceLevel?[] _slots;
+    private readonly ObjectPool<PriceLevel> _levelPool = new(() => new PriceLevel(), level => level.Reset());
 
     private int _count;
     private int? _lowestOccupiedSlot;
@@ -87,7 +88,7 @@ public sealed class ArrayPriceLadder : IPriceLadder
         var level = _slots[slot];
         if (level == null)
         {
-            level = new PriceLevel();
+            level = _levelPool.Rent();
             _slots[slot] = level;
             _count++;
             _lowestOccupiedSlot = _lowestOccupiedSlot is { } lo ? Math.Min(lo, slot) : slot;
@@ -103,6 +104,7 @@ public sealed class ArrayPriceLadder : IPriceLadder
         if (SlotIndexOf(price) is not { } slot || !ReferenceEquals(_slots[slot], level)) return;
 
         _slots[slot] = null;
+        _levelPool.Return(level);
         _count--;
 
         if (_count == 0)

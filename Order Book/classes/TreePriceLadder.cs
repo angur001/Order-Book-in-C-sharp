@@ -19,6 +19,7 @@ namespace OrderBook.Classes;
 public sealed class TreePriceLadder : IPriceLadder
 {
     private readonly SortedDictionary<Price, PriceLevel> _levels;
+    private readonly ObjectPool<PriceLevel> _levelPool = new(() => new PriceLevel(), level => level.Reset());
     private Price? _worstPrice;
 
     public TreePriceLadder(IComparer<Price> bestFirstComparer)
@@ -37,7 +38,7 @@ public sealed class TreePriceLadder : IPriceLadder
     {
         if (!_levels.TryGetValue(price, out var level))
         {
-            level = new PriceLevel();
+            level = _levelPool.Rent();
             _levels[price] = level;
             if (_worstPrice is not { } worst || _levels.Comparer.Compare(price, worst) > 0)
             {
@@ -52,6 +53,7 @@ public sealed class TreePriceLadder : IPriceLadder
     {
         if (level.Count != 0) return;
         _levels.Remove(price);
+        _levelPool.Return(level);
         if (_worstPrice == price)
         {
             _worstPrice = _levels.Count == 0 ? null : _levels.Keys.Last();
